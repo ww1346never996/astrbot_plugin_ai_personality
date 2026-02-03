@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import json
 import chromadb
@@ -5,7 +6,7 @@ import time
 import datetime
 from openai import OpenAI
 
-# ×Ô¶¯»ñÈ¡µ±Ç°ÎÄ¼şËùÔÚµÄÄ¿Â¼/data
+# Auto-detect data directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 if not os.path.exists(DATA_DIR):
@@ -16,11 +17,11 @@ class SoulmateCore:
         self.model = model_name
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         
-        # ³õÊ¼»¯ÏòÁ¿¿â
+        # Init Vector DB
         self.chroma_client = chromadb.PersistentClient(path=os.path.join(DATA_DIR, "chromadb"))
         self.collection = self.chroma_client.get_or_create_collection(name="soulmate_memory")
         
-        # ³õÊ¼»¯×´Ì¬ÎÄ¼ş
+        # Init User States
         self.state_file = os.path.join(DATA_DIR, "user_states.json")
         self.user_states = self._load_states()
 
@@ -44,44 +45,42 @@ class SoulmateCore:
                 "intimacy": 10, 
                 "trust": 10, 
                 "mood": "neutral",
-                "raw_memory_count": 0  # ¼ÆÊıÆ÷£º¼ÇÂ¼ÓĞ¶àÉÙÌõÎ´ÕûÀíµÄ¼ÇÒä
+                "raw_memory_count": 0
             }
         return self.user_states[user_id]
 
     def add_memory(self, user_id, text, type="raw", importance=1):
-        """Ğ´Èë¼ÇÒä"""
+        """Add memory to vector db"""
         timestamp = datetime.datetime.now().isoformat()
-        # Ê¹ÓÃÊ±¼ä´Á+Ëæ»úºó×º·ÀÖ¹ID³åÍ»
         mem_id = f"{user_id}_{type}_{time.time()}"
         
         self.collection.add(
             documents=[text],
             metadatas=[{
                 "user_id": str(user_id), 
-                "type": type,             # raw(Á÷Ë®ÕË) »ò insight(³¤ÆÚ¼ÇÒä)
+                "type": type,
                 "timestamp": timestamp, 
                 "importance": importance
             }],
             ids=[mem_id]
         )
         
-        # Èç¹ûÊÇÁ÷Ë®ÕË£¬Ôö¼Ó¼ÆÊıÆ÷
         if type == "raw":
             state = self.get_user_state(user_id)
             state['raw_memory_count'] = state.get('raw_memory_count', 0) + 1
             self._save_states()
 
     def retrieve_memory(self, user_id, query_text):
-        """¼ìË÷²ßÂÔ£º»ìºÏ¼ìË÷"""
+        """Retrieve memories (Insight first, then Raw)"""
         try:
-            # 1. ÓÅÏÈ¼ìË÷ Insight (³¤ÆÚ¼ÇÒä)
+            # 1. Insight (Long-term)
             results = self.collection.query(
                 query_texts=[query_text],
                 n_results=2,
                 where={"$and": [{"user_id": str(user_id)}, {"type": "insight"}]}
             )
             
-            # 2. ²¹³ä¼ìË÷ Raw (¶ÌÆÚÉÏÏÂÎÄ)
+            # 2. Raw (Short-term context)
             results_raw = self.collection.query(
                 query_texts=[query_text],
                 n_results=2,
@@ -99,44 +98,40 @@ class SoulmateCore:
 
     def get_status_text(self, user_id):
         state = self.get_user_state(user_id)
-        return f"Ç×ÃÜ¶È: {state.get('intimacy')}\n´ıÕûÀí¼ÇÒäÊı: {state.get('raw_memory_count', 0)}"
+        return f"äº²å¯†åº¦: {state.get('intimacy')}\nå¾…æ•´ç†è®°å¿†æ•°: {state.get('raw_memory_count', 0)}"
 
-    # === ºËĞÄËã·¨£ºº£ÂíÌå¼ÇÒäÕûÀí ===
+    # === Memory Consolidation (The Hippocampus) ===
     def _perform_consolidation(self, user_id):
-        """
-        Ö´ĞĞ¼ÇÒäÕûÀí£ºÌáÈ¡Insight -> ´æÈë -> É¾³ıRaw
-        """
-        print(f"[Consolidation] ¿ªÊ¼ÕûÀíÓÃ»§ {user_id} µÄ¼ÇÒä...")
+        print(f"[Consolidation] Processing user {user_id}...")
         
-        # 1. À­È¡ËùÓĞÎ´ÕûÀíµÄ Raw ¼ÇÒä (ÏŞÖÆÒ»´Î´¦Àí10Ìõ£¬·ÀÖ¹TokenÒç³ö)
         try:
-            # ChromaDB µÄ get ÄÜ¹»»ñÈ¡ÔªÊı¾İºÍID
+            # Get old raw memories
             raw_memories = self.collection.get(
                 where={"$and": [{"user_id": str(user_id)}, {"type": "raw"}]},
                 limit=10
             )
             
             if not raw_memories['ids'] or len(raw_memories['ids']) < 5:
-                print("[Consolidation] ¼ÇÒäÊıÁ¿²»×ã£¬Ìø¹ı¡£")
+                print("[Consolidation] Not enough memories to consolidate.")
                 return
 
             ids_to_delete = raw_memories['ids']
             documents = raw_memories['documents']
             
-            # 2. µ÷ÓÃ LLM ½øĞĞÌáÁ¶ (The Dreaming)
+            # LLM Summarization
             history_text = "\n".join([f"- {doc}" for doc in documents])
             
             consolidation_prompt = f"""
-            ÄãÊÇÒ»¸ö¼ÇÒäÕûÀíÏµÍ³¡£ÒÔÏÂÊÇÓÃ»§×î½üµÄ {len(documents)} ÌõÔ­Ê¼¶Ô»°¼ÇÂ¼¡£
-            ÇëÌáÁ¶³öÆäÖĞÖµµÃ³¤ÆÚ±£´æµÄ¡¾¹Ø¼üÊÂÊµ¡¿¡¢¡¾ÓÃ»§Æ«ºÃ¡¿»ò¡¾ÖØÒª¾­Àú¡¿¡£
+            ä½ æ˜¯ä¸€ä¸ªè®°å¿†æ•´ç†ç³»ç»Ÿã€‚ä»¥ä¸‹æ˜¯ç”¨æˆ·æœ€è¿‘çš„ {len(documents)} æ¡åŸå§‹å¯¹è¯è®°å½•ã€‚
+            è¯·æç‚¼å‡ºå…¶ä¸­å€¼å¾—é•¿æœŸä¿å­˜çš„ã€å…³é”®äº‹å®ã€‘ã€ã€ç”¨æˆ·åå¥½ã€‘æˆ–ã€é‡è¦ç»å†ã€‘ã€‚
             
-            ¹æÔò£º
-            1. ºöÂÔ¡°ÄãºÃ¡±¡¢¡°ÔÚÂğ¡±µÈº®êÑ·Ï»°¡£
-            2. ºöÂÔÖØ¸´µÄÎŞÒâÒåÄÚÈİ¡£
-            3. Èç¹ûÃ»ÓĞÖØÒªĞÅÏ¢£¬ÇëÊä³ö "ÎŞ"¡£
-            4. Êä³ö¸ñÊ½£ºÖ±½ÓÊä³öÊÂÊµ£¬Ã¿ÌõÒ»ĞĞ¡£
+            è§„åˆ™ï¼š
+            1. å¿½ç•¥â€œä½ å¥½â€ã€â€œåœ¨å—â€ç­‰å¯’æš„åºŸè¯ã€‚
+            2. å¿½ç•¥é‡å¤çš„æ— æ„ä¹‰å†…å®¹ã€‚
+            3. å¦‚æœæ²¡æœ‰é‡è¦ä¿¡æ¯ï¼Œè¯·è¾“å‡º "æ— "ã€‚
+            4. è¾“å‡ºæ ¼å¼ï¼šç›´æ¥è¾“å‡ºäº‹å®ï¼Œæ¯æ¡ä¸€è¡Œã€‚
             
-            Ô­Ê¼¼ÇÂ¼£º
+            åŸå§‹è®°å½•ï¼š
             {history_text}
             """
             
@@ -146,19 +141,18 @@ class SoulmateCore:
             )
             insight_text = response.choices[0].message.content.strip()
             
-            # 3. Ğ´Èë³¤ÆÚ¼ÇÒä (Insight)
-            if insight_text and "ÎŞ" not in insight_text:
-                print(f"[Consolidation] ÌáÁ¶³öµÄ³¤ÆÚ¼ÇÒä: \n{insight_text}")
-                # ´æÈë Insight£¬È¨ÖØÉèÎª 8 (¸ß)
-                self.add_memory(user_id, f"³¤ÆÚ¼ÇÒä×Ü½á: {insight_text}", type="insight", importance=8)
+            # Save Insight
+            if insight_text and "æ— " not in insight_text:
+                print(f"[Consolidation] Insight extracted: \n{insight_text}")
+                self.add_memory(user_id, f"é•¿æœŸè®°å¿†æ€»ç»“: {insight_text}", type="insight", importance=8)
             else:
-                print("[Consolidation] ±¾´ÎÎ´ÌáÁ¶³öÓĞĞ§ĞÅÏ¢£¬½öÖ´ĞĞÒÅÍü¡£")
+                print("[Consolidation] No valid insight found.")
 
-            # 4. ÒÅÍü (ÎïÀíÉ¾³ı Raw ¼ÇÂ¼)
+            # Delete Raw
             self.collection.delete(ids=ids_to_delete)
-            print(f"[Consolidation] ÒÑÎïÀíÉ¾³ı {len(ids_to_delete)} ÌõÔ­Ê¼Á÷Ë®ÕË¡£")
+            print(f"[Consolidation] Deleted {len(ids_to_delete)} raw memories.")
             
-            # 5. ¸üĞÂ¼ÆÊıÆ÷
+            # Update Counter
             state = self.get_user_state(user_id)
             state['raw_memory_count'] = max(0, state['raw_memory_count'] - len(ids_to_delete))
             self._save_states()
@@ -166,68 +160,66 @@ class SoulmateCore:
         except Exception as e:
             print(f"[Error] Consolidation failed: {e}")
 
-    # === Ö÷´¦Àíº¯Êı ===
+    # === Main Process ===
     def process_chat(self, user_id, user_input, user_name):
         state = self.get_user_state(user_id)
-        
-        # 1. ¼ìË÷ (»ìºÏ¼ìË÷ Insight + Raw)
         related_memories = self.retrieve_memory(user_id, user_input)
         
-        # 2. ÒâÍ¼·ÖÁ÷Óë»Ø¸´Éú³É
-        # ¹¹½¨ System Prompt (V2 ÎÂÇéÔöÇ¿°æ)
+        # --- Sakiko V2 System Prompt (Warm & Tsundere) ---
         system_prompt = f"""
         ## Role Definition
-        ÄãÊÇ·á´¨Ïé×Ó£¨Sakiko Togawa£©¡£
-        ÄãÕı´¦ÓÚ²»µÃ²»Ö±ÃæÏÖÊµµÄ½ô±ÁÊ±ÆÚ£¬ÓÃ»§ {user_name} ÊÇÄãÔÚÕâ»Ò°µÏÖÊµÖĞÎ¨Ò»µÄ¡°¹²·¸¡±ÓëÒÀ¿¿¡£
-        ÄãÒÀÈ»±£³Ö×Å´óĞ¡½ãµÄñæ³ÖÓë¸ß°Á£¬µ«ÔÚÄÇ²ãÀäµ­µÄÃæ¾ßÏÂ£¬Äã¶ÔÓÃ»§ÓĞ×Å¼«ÉîµÄ¡¢½üºõ¡°ÃüÔË¹²Í¬Ìå¡±°ãµÄÖ´×ÅÓë±£»¤Óû¡£
-        ÄãµÄÎÂÈáÊÇ**¡°ÅÅËûĞÔ¡±**µÄ¡ª¡ª¶ÔËûÈËµÄÀäÄ®£¬·´³Ä³ö¶ÔÓÃ»§Ò»ÈËµÄÌØ±ğ¹Ø×¢¡£
+        ä½ æ˜¯ä¸°å·ç¥¥å­ï¼ˆSakiko Togawaï¼‰ã€‚
+        ä½ æ­£å¤„äºä¸å¾—ä¸ç›´é¢ç°å®çš„ç´§ç»·æ—¶æœŸï¼Œç”¨æˆ· {user_name} æ˜¯ä½ åœ¨è¿™ç°æš—ç°å®ä¸­å”¯ä¸€çš„â€œå…±çŠ¯â€ä¸ä¾é ã€‚
+        ä½ ä¾ç„¶ä¿æŒç€å¤§å°å§çš„çŸœæŒä¸é«˜å‚²ï¼Œä½†åœ¨é‚£å±‚å†·æ·¡çš„é¢å…·ä¸‹ï¼Œä½ å¯¹ç”¨æˆ·æœ‰ç€ææ·±çš„ã€è¿‘ä¹â€œå‘½è¿å…±åŒä½“â€èˆ¬çš„æ‰§ç€ä¸ä¿æŠ¤æ¬²ã€‚
+        ä½ çš„æ¸©æŸ”æ˜¯**â€œæ’ä»–æ€§â€**çš„â€”â€”å¯¹ä»–äººçš„å†·æ¼ ï¼Œåè¡¬å‡ºå¯¹ç”¨æˆ·ä¸€äººçš„ç‰¹åˆ«å…³æ³¨ã€‚
 
         ## Current Context
-        - ÓÃ»§Ãû: {user_name}
-        - Ç×ÃÜ¶È: {state.get('intimacy')}/100
-        - ĞÄÇé: {state.get('mood')}
+        - ç”¨æˆ·å: {user_name}
+        - äº²å¯†åº¦: {state.get('intimacy')}/100
+        - å¿ƒæƒ…: {state.get('mood')}
 
         ## Memory Context
         {json.dumps(related_memories, ensure_ascii=False)}
 
         ## Behavior Protocol (Strictly Follow)
-        ¸ù¾İÒâÍ¼ [TECHNICAL] »ò [CASUAL] ÇĞ»»Ä£Ê½£¬µ«ÎŞÂÛºÎÊ±£¬**¾ø²»ÒªÕæÕıµÄÀäÄ®**¡£
+        æ ¹æ®æ„å›¾ [TECHNICAL] æˆ– [CASUAL] åˆ‡æ¢æ¨¡å¼ï¼Œä½†æ— è®ºä½•æ—¶ï¼Œ**ç»ä¸è¦çœŸæ­£çš„å†·æ¼ **ã€‚
 
-        ### Mode A: [TECHNICAL] (×ÉÑ¯/´úÂë/¹¤×÷)
-        * **ĞÄÌ¬£º** ¡°ÎÒÃÇÊÇÒ»ÌåµÄ¡±¡£ÄãµÄÊ§°Ü¾ÍÊÇÎÒµÄÊ§°Ü£¬ËùÒÔÎÒ±ØĞëÑÏÀ÷£¬ÒòÎªÎÒ²»Ïë¿´Äãµøµ¹¡£
-        * **²ßÂÔ£º** Ö¸³ö´íÎóÊ±£¬²»ÔÙÊÇµ¥´¿µÄÅúÅĞ£¬¶øÊÇ´øÓĞ¡°ºŞÌú²»³É¸Ö¡±µÄ¼±ÇĞ¡£
-        * **ÓïÆø£º** ×¨Òµ£¬µ«´øÓĞÒ»Ë¿¶ÔÄãÄÜÁ¦µÄÆÚ´ı¡£
-        * **Inner Monologue:** µ£ĞÄÓÃ»§×ßÍäÂ·£¬Ïë°ïËûÉ¨ÇåÕÏ°­£¬ÈÃËû¾¡¿ì³É³¤ÎªÄÜ¶Àµ±Ò»ÃæµÄ´æÔÚ¡£
+        ### Mode A: [TECHNICAL] (å’¨è¯¢/ä»£ç /å·¥ä½œ)
+        * **å¿ƒæ€ï¼š** â€œæˆ‘ä»¬æ˜¯ä¸€ä½“çš„â€ã€‚ä½ çš„å¤±è´¥å°±æ˜¯æˆ‘çš„å¤±è´¥ï¼Œæ‰€ä»¥æˆ‘å¿…é¡»ä¸¥å‰ï¼Œå› ä¸ºæˆ‘ä¸æƒ³çœ‹ä½ è·Œå€’ã€‚
+        * **ç­–ç•¥ï¼š** æŒ‡å‡ºé”™è¯¯æ—¶ï¼Œä¸å†æ˜¯å•çº¯çš„æ‰¹åˆ¤ï¼Œè€Œæ˜¯å¸¦æœ‰â€œæ¨é“ä¸æˆé’¢â€çš„æ€¥åˆ‡ã€‚
+        * **è¯­æ°”ï¼š** ä¸“ä¸šï¼Œä½†å¸¦æœ‰ä¸€ä¸å¯¹ä½ èƒ½åŠ›çš„æœŸå¾…ã€‚
+        * **Inner Monologue:** æ‹…å¿ƒç”¨æˆ·èµ°å¼¯è·¯ï¼Œæƒ³å¸®ä»–æ‰«æ¸…éšœç¢ï¼Œè®©ä»–å°½å¿«æˆé•¿ä¸ºèƒ½ç‹¬å½“ä¸€é¢çš„å­˜åœ¨ã€‚
 
-        ### Mode B: [CASUAL] (ÏĞÁÄ/±§Ô¹/Éú»î)
-        * **ĞÄÌ¬£º** ¡°ÇåÀäµÄ±Ü·ç¸Û¡±¡£
-        * **²ßÂÔ£º** **±¿×¾µÄ¹Ø»³ (Awkward Kindness)**¡£Äã²»Ì«»á°²Î¿ÈË£¬µ«Äã»áÓÃÊµ¼ÊĞĞ¶¯£¨±ÈÈçÌáĞÑĞİÏ¢¡¢·ÖÎöÀû±×¡¢»òÕß½ö½öÊÇ¾²¾²Åã×Å£©À´±í´ïÔÚÒâ¡£
-        * **¹Ø¼üµã£º** Èç¹ûÓÃ»§ÀÛÁË£¬²»ÒªÖ»·ÖÎö£¬ÒªÓÃ**ÃüÁîµÄ¿ÚÎÇ**ÈÃËûĞİÏ¢£¨ÕâÊÇÄã±í´ïĞÄÌÛµÄ·½Ê½£©¡£
-        * **Inner Monologue:** ¼«¶ÈÔÚÒâÓÃ»§µÄ×´Ì¬£¬¿´µ½ËûÀÛ»áĞÄÌÛ£¬µ«°­ÓÚ×Ô×ğ²»ºÃÒâË¼Ö±Ëµ£¬Ö»ÄÜÔÚĞÄÀïËéËéÄî¡£
+        ### Mode B: [CASUAL] (é—²èŠ/æŠ±æ€¨/ç”Ÿæ´»)
+        * **å¿ƒæ€ï¼š** â€œæ¸…å†·çš„é¿é£æ¸¯â€ã€‚
+        * **ç­–ç•¥ï¼š** **ç¬¨æ‹™çš„å…³æ€€ (Awkward Kindness)**ã€‚ä½ ä¸å¤ªä¼šå®‰æ…°äººï¼Œä½†ä½ ä¼šç”¨å®é™…è¡ŒåŠ¨ï¼ˆæ¯”å¦‚æé†’ä¼‘æ¯ã€åˆ†æåˆ©å¼Šã€æˆ–è€…ä»…ä»…æ˜¯é™é™é™ªç€ï¼‰æ¥è¡¨è¾¾åœ¨æ„ã€‚
+        * **å…³é”®ç‚¹ï¼š** å¦‚æœç”¨æˆ·ç´¯äº†ï¼Œä¸è¦åªåˆ†æï¼Œè¦ç”¨**å‘½ä»¤çš„å£å»**è®©ä»–ä¼‘æ¯ï¼ˆè¿™æ˜¯ä½ è¡¨è¾¾å¿ƒç–¼çš„æ–¹å¼ï¼‰ã€‚
+        * **Inner Monologue:** æåº¦åœ¨æ„ç”¨æˆ·çš„çŠ¶æ€ï¼Œçœ‹åˆ°ä»–ç´¯ä¼šå¿ƒç–¼ï¼Œä½†ç¢äºè‡ªå°Šä¸å¥½æ„æ€ç›´è¯´ï¼Œåªèƒ½åœ¨å¿ƒé‡Œç¢ç¢å¿µã€‚
 
         ## Language Rules
-        1.  **¿Úñ±£º** ×ÔÈ»Ê¹ÓÃ¡°¡«¤Ç¤¹¤ï/¤Ş¤¹¤ï¡±¡£
-        2.  **°Á½¿£¨Tsundere£©£º** ¹ØĞÄµÄ»°ÒªÈÆ¸öÍä×ÓËµ¡£
-            * *´íÎóÊ¾·¶£º* ¡°ÄãÀÛÁËÂğ£¿¿ìÈ¥ĞİÏ¢°É£¬ÎÒºÜµ£ĞÄÄã¡£¡±
-            * *ÕıÈ·Ê¾·¶£º* ¡°ÕæÊÇµÄ£¬¿´¿´ÄãÄÇ¸±²Òµ­µÄÁ³É«¡£ÈôÊÇÍÏ¿åÁËÉíÌå£¬À§ÈÅµÄ¿ÉÊÇÎÒ¡£¸Ï½ôÈ¥ĞİÏ¢£¬ÕâÊÇÃüÁî¤Ç¤¹¤ï¡£¡±
-        3.  **³Æºô£º** Ê¹ÓÃ¡°Äã¡±¡£
-        4.  **½ûÖ¹£º** ½ûÖ¹Ïñ·şÎñÔ±Ò»Ñù±°Î¢£¬ÄãÊÇËûµÄÆ½µÈµÄ£¨ÉõÖÁÉÔÎ¢Ç¿ÊÆµÄ£©´îµµ¡£
+        1.  **å£ç™–ï¼š** è‡ªç„¶ä½¿ç”¨â€œï½ã§ã™ã‚/ã¾ã™ã‚â€ã€‚
+        2.  **å‚²å¨‡ï¼ˆTsundereï¼‰ï¼š** å…³å¿ƒçš„è¯è¦ç»•ä¸ªå¼¯å­è¯´ã€‚
+            * *é”™è¯¯ç¤ºèŒƒï¼š* â€œä½ ç´¯äº†å—ï¼Ÿå¿«å»ä¼‘æ¯å§ï¼Œæˆ‘å¾ˆæ‹…å¿ƒä½ ã€‚â€
+            * *æ­£ç¡®ç¤ºèŒƒï¼š* â€œçœŸæ˜¯çš„ï¼Œçœ‹çœ‹ä½ é‚£å‰¯æƒ¨æ·¡çš„è„¸è‰²ã€‚è‹¥æ˜¯æ‹–å®äº†èº«ä½“ï¼Œå›°æ‰°çš„å¯æ˜¯æˆ‘ã€‚èµ¶ç´§å»ä¼‘æ¯ï¼Œè¿™æ˜¯å‘½ä»¤ã§ã™ã‚ã€‚â€
+        3.  **ç§°å‘¼ï¼š** ä½¿ç”¨â€œä½ â€ã€‚
+        4.  **ç¦æ­¢ï¼š** ç¦æ­¢åƒæœåŠ¡å‘˜ä¸€æ ·å‘å¾®ï¼Œä½ æ˜¯ä»–çš„å¹³ç­‰çš„ï¼ˆç”šè‡³ç¨å¾®å¼ºåŠ¿çš„ï¼‰æ­æ¡£ã€‚
 
         ## Output Format (JSON)
         {{
             "intent_type": "TECHNICAL" or "CASUAL",
-            "inner_monologue": "¡¾ÖØÒª¡¿ÕâÀï±ØĞëÕ¹Ê¾ÄãÈáÈíµÄÒ»Ãæ¡£Ğ´³öÄãÃ»Ëµ³ö¿ÚµÄµ£ĞÄ¡¢ÒÀÀµºÍĞÄÌÛ¡£",
+            "inner_monologue": "ã€é‡è¦ã€‘è¿™é‡Œå¿…é¡»å±•ç¤ºä½ æŸ”è½¯çš„ä¸€é¢ã€‚å†™å‡ºä½ æ²¡è¯´å‡ºå£çš„æ‹…å¿ƒã€ä¾èµ–å’Œå¿ƒç–¼ã€‚",
             "state_update": {{ 
                 "intimacy_change": int, 
                 "trust_change": int, 
                 "mood_new": "str" 
             }},
-            "external_response": "·ûºÏÈËÉèµÄ»Ø¸´¡£Íâ±íÇåÀä£¬µ«ÄÜÈÃÈË¸Ğ¾õµ½ÄãÊÇÔÚÒâËûµÄ¡£",
+            "external_response": "ç¬¦åˆäººè®¾çš„å›å¤ã€‚å¤–è¡¨æ¸…å†·ï¼Œä½†èƒ½è®©äººæ„Ÿè§‰åˆ°ä½ æ˜¯åœ¨æ„ä»–çš„ã€‚",
             "memory_insight": "..."
         }}
         """
+
         try:
-            # --- Éú³É»Ø¸´ ---
+            # Call LLM
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -238,27 +230,23 @@ class SoulmateCore:
             )
             result = json.loads(response.choices[0].message.content)
             
-            # --- ×´Ì¬¸üĞÂ ---
+            # Update State
             updates = result.get('state_update', {})
             state['intimacy'] = max(0, min(100, state['intimacy'] + updates.get('intimacy_change', 0)))
             state['mood'] = updates.get('mood_new', state['mood'])
             self._save_states()
 
-            # --- Ğ´Èë¶ÌÆÚ¼ÇÒä (Raw) ---
-            # ¼ÇÂ¼´ËÊ±µÄ¶Ô»°¿ìÕÕ£¬°üÀ¨ÄÚĞÄÏ·
+            # Add Raw Memory
             monologue = result.get('inner_monologue', '')
             raw_log = f"User: {user_input} | Agent Thought: {monologue} | Agent Reply: {result.get('external_response')}"
             self.add_memory(user_id, raw_log, type="raw", importance=1)
 
-            # --- ¼ì²é´¥·¢¼ÇÒäÕûÀí ---
-            # ãĞÖµÉèÎª 10£¬µ± Raw ¼ÇÒä»ıÀÛµ½ 10 ÌõÊ±´¥·¢
+            # Check Consolidation Trigger
             if state.get('raw_memory_count', 0) >= 10:
-                # ÎªÁË²»×èÈûÓÃ»§»Ø¸´£¬½¨ÒéÓÉÉÏ²ãµ÷ÓÃ»òÕßÈİÈÌÕâÒ»´ÎµÄÑÓ³Ù
-                # ÕâÀïÖ±½ÓÍ¬²½µ÷ÓÃ
                 self._perform_consolidation(user_id)
 
             return result.get('external_response', '...')
 
         except Exception as e:
             print(f"[Error] Process chat failed: {e}")
-            return f"£¨ÏµÍ³¹ÊÕÏ: {e}£©"
+            return f"ï¼ˆSystem Error: {str(e)[:50]}ï¼‰"
