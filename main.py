@@ -2,7 +2,10 @@ import asyncio
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-from astrbot.api.all import BaseModel, Field # 引入 Field 用于定义配置项描述
+
+# --- 关键修改：从 pydantic 直接导入 BaseModel 和 Field ---
+from pydantic import BaseModel, Field 
+
 from .logic import SoulmateCore
 
 # --- 1. 定义配置模型 ---
