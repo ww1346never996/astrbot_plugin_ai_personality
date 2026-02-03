@@ -71,7 +71,7 @@ class SoulmatePlugin(Star):
         status_text = await asyncio.to_thread(self.core.get_status_text, user_id)
         yield event.plain_result(status_text)
 
-    # --- 功能 2: 接管日常对话 (核心) ---
+   # --- 功能 2: 接管日常对话 (核心) ---
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def handle_conversation(self, event: AstrMessageEvent):
         if not self.core:
@@ -81,9 +81,15 @@ class SoulmatePlugin(Star):
         # 过滤指令
         if message_str.startswith("/") or message_str.startswith("！"):
             return
-        # 仅处理私聊或@
-        if not event.is_at_or_private:
+
+        # --- 修改开始 ---
+        # 仅处理私聊或@ (修复兼容性问题)
+        is_private = event.message_obj.type == "private"
+        is_at = getattr(event, "is_at", False)
+
+        if not (is_private or is_at):
             return
+        # --- 修改结束 ---
 
         # 阻断 AstrBot 默认回复
         event.stop_event()
