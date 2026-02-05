@@ -29,4 +29,7 @@ USER_CONTEXT_TEMPLATE = """### User Profile
 {user_profile}
 
 ### Relevant Memories
-{memories}"""
+{memories}
+
+### Visual/Observation Data
+[SYSTEM_OBSERVATION]"""
