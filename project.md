@@ -222,6 +222,10 @@ LLM 摘要 (Consolidation Template)
 |-----|------|---------|
 | 2026-02-05 | `raw_count` 与实际数量不同步 | `update_state` 新增直接设置 `raw_count` 支持 |
 | 2026-02-05 | consolidation 流程难以追踪 | `_consolidate` 添加 `[Consolidate]` 调试日志 |
+| 2026-02-05 | 回复生硬、忽略上下文 | **检索策略优化**：新增 `_enhance_query()` 语义扩展，捕捉"累→工作→疲劳"等关联词 |
+| 2026-02-05 | 反思过于频繁、每次提炼内容少 | **反思触发条件优化**：raw_count >= 15 且至少 3 条待合并数据才触发 |
+| 2026-02-05 | 回复与之前记忆矛盾 | **Prompt 增强**：新增"记忆使用规则"，强制要求引用记忆、避免矛盾 |
+| 2026-02-05 | 缺乏短期对话连贯性 | **短期记忆传递**：新增 `get_recent_raw_logs()` 方法，将最近 5 条对话作为上下文传递 |
 
 ---
 
@@ -240,6 +244,7 @@ LLM 摘要 (Consolidation Template)
 * 关心用户但间接表达
 * 保护性强但维护尊严
 * 根据用户交互模式动态演化
+* **记忆一致性**：必须引用之前的对话内容，避免自相矛盾
 
 ---
 
@@ -284,9 +289,9 @@ LLM 摘要 (Consolidation Template)
 | 文件 | 职责 | 代码行数 |
 |------|------|---------|
 | [main.py](main.py) | 入口、事件处理、消息提取 | ~100 |
-| [core/agent.py](core/agent.py) | 控制器、LLM编排、工具调用 | ~230 |
-| [core/memory.py](core/memory.py) | 数据层、向量存储、状态管理 | ~160 |
-| [core/prompts.py](core/prompts.py) | 提示模板、人格定义 | ~100 |
+| [core/agent.py](core/agent.py) | 控制器、LLM编排、工具调用 | ~240 |
+| [core/memory.py](core/memory.py) | 数据层、向量存储、状态管理 | ~190 |
+| [core/prompts.py](core/prompts.py) | 提示模板、人格定义 | ~130 |
 | [config.py](config.py) | 配置管理 | ~65 |
 
 ---
@@ -303,3 +308,4 @@ LLM 摘要 (Consolidation Template)
   * 音视频处理的异常处理
   * 记忆合并的并行化
   * System Prompt 针对 Minimax 模型特性的进一步调优
+  * 记忆系统的冷启动优化（新用户引导）

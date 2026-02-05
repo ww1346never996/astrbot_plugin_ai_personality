@@ -67,12 +67,15 @@ class SakikoAgent:
 
     def _synthesize_response(self, user_id, user_name, user_input, observation, intent_data):
         state = self.memory.get_state(user_id)
-        
-        # 记忆检索
+
+        # 记忆检索：长期记忆
         search_query = user_input
         if intent_data.get('is_technical'): search_query += " technical"
         if observation: search_query += f" {observation[:50]}"
         mems = self.memory.retrieve(user_id, search_query)
+
+        # 获取最近对话历史（短期记忆）用于上下文连贯性
+        recent_history = self.memory.get_recent_raw_logs(user_id, limit=5)
         
         is_tech = intent_data.get('is_technical', False)
         mode_str = "TECHNICAL" if is_tech else "CASUAL"
@@ -81,17 +84,19 @@ class SakikoAgent:
         current_time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         try:
-            # === 修复点 2: 注入时间 ===
+            # === 注入时间、记忆、短期对话历史 ===
             system_prompt = SAKIKO_SYSTEM_TEMPLATE.format(
                 user_name=user_name,
-                current_time=current_time_str, # <--- 注入
+                current_time=current_time_str,
                 mode_indicator=mode_str,
                 intimacy=state['intimacy'],
                 mood=state['mood'],
                 memories=json.dumps(mems, ensure_ascii=False),
-                observation=observation if observation else "无"
+                observation=observation if observation else "无",
+                recent_history=recent_history if recent_history else "无"
             )
-        except:
+        except Exception as e:
+            logger.warning(f"[Sakiko] Prompt format failed: {e}, using default template")
             system_prompt = SAKIKO_SYSTEM_TEMPLATE
 
         final_prompt = f"""
@@ -124,9 +129,14 @@ class SakikoAgent:
             log_content = f"[{'TECH' if is_tech else 'CHAT'}] User: {user_input} | Reply: {res.get('external_response')}"
             self.memory.add_log(user_id, log_content, type="raw")
             
-            # 触发反思
-            if self.memory.get_state(user_id)['raw_count'] >= 10:
-                self._consolidate(user_id)
+            # 触发反思：累积 15 条以上才触发，避免过于频繁
+            # 同时检查是否至少有 3 条新对话才值得合并
+            raw_state = self.memory.get_state(user_id)
+            if raw_state['raw_count'] >= 15:
+                # 再检查是否有足够的待合并数据
+                raw_data = self.memory.get_raw_logs_for_consolidation(user_id)
+                if len(raw_data['ids']) >= 3:
+                    self._consolidate(user_id)
             
             return res.get("external_response")
 

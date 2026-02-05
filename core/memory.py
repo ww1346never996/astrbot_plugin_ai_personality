@@ -53,6 +53,35 @@ class MemoryManager:
             logger.error(f"Save JSON failed: {e}")
             
     # === 请将此方法添加到 MemoryManager 类中 ===
+    def get_recent_raw_logs(self, user_id, limit=5):
+        """获取最近 N 条原始对话记录用于上下文连贯性"""
+        coll = self.chroma.get_or_create_collection("soulmate_memory")
+        try:
+            results = coll.get(
+                where={"$and": [{"user_id": str(user_id)}, {"type": "raw"}]},
+                include=["metadatas", "documents"],
+                limit=limit + 5  # 多取一些用于排序
+            )
+
+            if not results['ids']:
+                return []
+
+            # 组装并按时间倒序
+            logs = []
+            for i in range(len(results['ids'])):
+                meta = results['metadatas'][i]
+                doc = results['documents'][i]
+                timestamp = float(meta.get("timestamp", 0))
+                logs.append({"ts": timestamp, "content": doc})
+
+            logs.sort(key=lambda x: x['ts'], reverse=True)
+            recent = logs[:limit]
+
+            return "\n".join([item['content'] for item in recent])
+        except Exception as e:
+            logger.error(f"[Memory Get Recent Raw Error] {e}")
+            return ""
+
     def get_recent_history(self, user_id, limit=3):
         """获取最近 N 条记忆用于 Status 展示"""
         coll = self.chroma.get_or_create_collection("soulmate_memory")
@@ -133,21 +162,78 @@ class MemoryManager:
         except Exception as e:
             logger.error(f"[Memory Add Error] {e}")
 
-    def retrieve(self, user_id, query_text, n_results=3):
+    def retrieve(self, user_id, query_text, n_results=5):
         coll = self.chroma.get_or_create_collection("soulmate_memory")
         try:
             # 如果 query 为空（比如只发图没说话），则不检索或检索最近
             if not query_text or not query_text.strip():
                 return []
-            
-            results = coll.query(
-                query_texts=[query_text],
-                n_results=n_results,
-                where={"user_id": str(user_id)}
-            )
-            return results['documents'][0] if results['documents'] else []
-        except:
+
+            # 构建增强的检索查询，包含语义扩展
+            # 提取关键情绪词和动作词
+            enhanced_query = self._enhance_query(query_text)
+
+            # 并行检索：原始查询 + 增强查询，取并集去重
+            all_results = []
+            for q in [query_text, enhanced_query]:
+                if q and q != query_text:  # 避免重复检索
+                    results = coll.query(
+                        query_texts=[q],
+                        n_results=n_results,
+                        where={"user_id": str(user_id)}
+                    )
+                    if results['documents']:
+                        all_results.extend(results['documents'][0])
+
+            # 如果增强查询没结果，用原始查询
+            if not all_results:
+                results = coll.query(
+                    query_texts=[query_text],
+                    n_results=n_results,
+                    where={"user_id": str(user_id)}
+                )
+                all_results = results['documents'][0] if results['documents'] else []
+
+            # 去重并保持顺序
+            seen = set()
+            unique_results = []
+            for doc in all_results:
+                if doc not in seen:
+                    seen.add(doc)
+                    unique_results.append(doc)
+
+            return unique_results[:n_results]
+        except Exception as e:
+            logger.error(f"[Memory Retrieve Error] {e}")
             return []
+
+    def _enhance_query(self, query_text):
+        """
+        语义扩展查询：提取情绪词、工作相关、疲劳相关等关键词
+        用于捕捉同一语义的不同表达方式
+        """
+        import re
+        # 定义关键词映射
+        keyword_map = {
+            "累": ["工作", "疲劳", "忙", "困", "疲倦", "劳累"],
+            "忙": ["工作", "加班", "赶工", "紧急", "deadline"],
+            "懒": ["休息", "放松", "空闲", "摸鱼"],
+            "工作": ["上班", "任务", "项目", "demo", "急活"],
+            "疲劳": ["累", "困", "没精神", "疲惫"],
+            "抱怨": ["吐槽", "牢骚", "不满"],
+        }
+
+        enhanced = []
+        for word in keyword_map:
+            if word in query_text:
+                enhanced.extend(keyword_map[word])
+
+        # 如果没有匹配，返回空
+        if not enhanced:
+            return ""
+
+        # 合并原始查询和扩展词
+        return " ".join([query_text] + list(set(enhanced)))
 
     def get_raw_logs_for_consolidation(self, user_id):
         coll = self.chroma.get_or_create_collection("soulmate_memory")
