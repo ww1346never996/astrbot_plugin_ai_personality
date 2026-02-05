@@ -34,8 +34,6 @@ SAKIKO_SYSTEM_TEMPLATE = """
 ## Current Context
 - 时间: {current_time}
 - 模式: {mode_indicator}
-- 亲密度: {intimacy}/100
-- 心情: {mood}
 
 ## User Profile (人格配置) - 优先参考
 {user_profile}
