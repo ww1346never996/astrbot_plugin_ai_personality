@@ -188,46 +188,88 @@ class SakikoAgent:
 
 ## 5. 记忆系统架构 (`core/memory.py`)
 
-### 5.1 存储结构
+### 5.1 三层架构设计
 
-| 存储类型 | 引擎 | 用途 | 生命周期 |
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         用户对话流                                    │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  Layer 3: Dynamic Profile (人格配置)                                 │
+│  ├─ personality_traits: 用户性格特征                                 │
+│  ├─ communication_style: 沟通风格 (formal/casual/balanced/playful) │
+│  ├─ humor_level: 幽默程度 (low/moderate/high)                      │
+│  ├─ caring_frequency: 关怀频率                                      │
+│  ├─ sensitive_topics: 敏感话题                                      │
+│  └─ relationship_summary: 关系定位                                   │
+│                                                                      │
+│  ← 当累积 10+ Insights 时触发 LLM 更新                              │
+└─────────────────────────────────────────────────────────────────────┘
+                                    ↑
+                                    │ _consolidate_insight_to_profile()
+                                    │
+┌─────────────────────────────────────────────────────────────────────┐
+│  Layer 2: Insights (长期记忆)                                        │
+│  ├─ facts: 用户告诉过你的事实                                       │
+│  ├─ preferences: 用户偏好、兴趣                                     │
+│  └─ important_events: 重要经历                                       │
+│                                                                      │
+│  ← 当累积 15+ Raw Logs 时触发 LLM 提炼                              │
+└─────────────────────────────────────────────────────────────────────┘
+                                    ↑
+                                    │ _consolidate_raw_to_insight()
+                                    │
+┌─────────────────────────────────────────────────────────────────────┐
+│  Layer 1: Raw Logs (短期对话)                                        │
+│  ├─ 原始对话记录                                                    │
+│  ├─ 自动语义扩展检索                                                │
+│  └─ 会话结束后自动清理                                              │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 5.2 存储结构
+
+| 存储类型 | 引擎 | 用途 | 触发条件 |
 |---------|------|------|---------|
-| **State** | JSON | 用户关系指标 (intimacy, mood, raw_count) | 持久化 |
-| **Raw Logs** | ChromaDB | 短期对话原始记录 | 合并后删除 |
-| **Insights** | ChromaDB | 长期记忆 (LLM 摘要的事实、偏好、重要经历) | 持久化 |
+| **State** | JSON | 关系指标 (intimacy, mood, raw_count, insight_count) | 持久化 |
+| **Raw Logs** | ChromaDB | 短期对话原始记录 | type="raw" |
+| **Insights** | ChromaDB | 长期事实/偏好 | type="insight" |
+| **Profile** | JSON | 用户人格配置 | 独立文件 |
 
-### 5.2 记忆合并流程
+### 5.3 统一检索接口
 
-```
-Raw Logs (数量 >= 10)
-        │
-        ▼
-MemoryManager.get_raw_logs_for_consolidation()
-        │
-        ▼
-LLM 摘要 (Consolidation Template)
-        │
-        ▼
-提取:
-├─ "insight" → 存储为 type="insight"
-├─ "evolution_instruction" → 更新动态人格配置
-        │
-        ▼
-删除 Raw Logs + 重置 raw_count (使用 update_state 直接赋值)
+```python
+def retrieve_all(user_id, query_text, n_results=5):
+    """
+    同时获取三层记忆，返回结构化数据：
+    {
+        "profile": "人格配置摘要",
+        "insights": ["记忆1", "记忆2", ...],
+        "recent_raw": "最近5条对话"
+    }
+    """
 ```
 
-### 5.3 修复记录
+### 5.4 记忆遗忘机制
+
+- **冗余删除**：当 Insight → Profile 合并时，标记并删除重复/过时的记忆
+- **阈值缓冲**：删除后保留 5 条 Insight 作为缓冲，避免频繁触发
+
+### 5.5 修复记录
 
 | 日期 | 问题 | 修复内容 |
 |-----|------|---------|
 | 2026-02-05 | `raw_count` 与实际数量不同步 | `update_state` 新增直接设置 `raw_count` 支持 |
 | 2026-02-05 | consolidation 流程难以追踪 | `_consolidate` 添加 `[Consolidate]` 调试日志 |
-| 2026-02-05 | 回复生硬、忽略上下文 | **检索策略优化**：新增 `_enhance_query()` 语义扩展，捕捉"累→工作→疲劳"等关联词 |
-| 2026-02-05 | 反思过于频繁、每次提炼内容少 | **反思触发条件优化**：raw_count >= 15 且至少 3 条待合并数据才触发 |
-| 2026-02-05 | 回复与之前记忆矛盾 | **Prompt 增强**：新增"记忆使用规则"，强制要求引用记忆、避免矛盾 |
-| 2026-02-05 | 缺乏短期对话连贯性 | **短期记忆传递**：新增 `get_recent_raw_logs()` 方法，将最近 5 条对话作为上下文传递 |
-| 2026-02-05 | 只发图片时 MCP 图片分析未触发 | **图片逻辑修复**：当 `text` 为空且有 `image_path` 时，强制设置 `need_image_analysis=True` |
-| 2026-02-05 | status 只显示 3 条记忆 | **Status 优化**：改为显示最近 5 条记忆；反思阈值从 10 改为 15 |
+| 2026-02-05 | 回复生硬、忽略上下文 | **检索策略优化**：新增 `_enhance_query()` 语义扩展 |
+| 2026-02-05 | 反思过于频繁 | **反思触发条件优化**：raw_count >= 15 且至少 3 条才触发 |
+| 2026-02-05 | 回复与之前记忆矛盾 | **Prompt 增强**：新增"记忆使用规则" |
+| 2026-02-05 | 缺乏短期对话连贯性 | **短期记忆传递**：新增 `get_recent_raw_logs()` |
+| 2026-02-05 | 只发图片时 MCP 未触发 | **图片逻辑修复**：强制设置 `need_image_analysis=True` |
+| 2026-02-05 | status 只显示 3 条 | **Status 优化**：改为显示最近 5 条 |
+| 2026-02-05 | 记忆碎片化、无统一人格配置 | **架构重构**：实现 Raw→Insight→Profile 三层架构 |
 
 ---
 
@@ -291,9 +333,9 @@ LLM 摘要 (Consolidation Template)
 | 文件 | 职责 | 代码行数 |
 |------|------|---------|
 | [main.py](main.py) | 入口、事件处理、消息提取 | ~100 |
-| [core/agent.py](core/agent.py) | 控制器、LLM编排、工具调用 | ~240 |
-| [core/memory.py](core/memory.py) | 数据层、向量存储、状态管理 | ~190 |
-| [core/prompts.py](core/prompts.py) | 提示模板、人格定义 | ~130 |
+| [core/agent.py](core/agent.py) | 控制器、LLM编排、工具调用 | ~365 |
+| [core/memory.py](core/memory.py) | 数据层、向量存储、状态管理 | ~345 |
+| [core/prompts.py](core/prompts.py) | 提示模板、人格定义 | ~142 |
 | [config.py](config.py) | 配置管理 | ~65 |
 
 ---
@@ -303,11 +345,13 @@ LLM 摘要 (Consolidation Template)
 * **完成度:** 核心架构已完成
 * **已实现:**
   * Minimax (Brain) + SiliconFlow (Ear) + ChromaDB 集成
-  * 记忆系统（Raw + Insight 双层）
+  * 记忆系统（三层架构：Raw → Insight → Profile）
+  * 统一检索接口 (retrieve_all)
+  * 记忆遗忘机制
   * MCP 工具集成（Web Search, Image Understanding）
   * 双人格模式切换（TECHNICAL / CASUAL）
 * **待优化:**
   * 音视频处理的异常处理
   * 记忆合并的并行化
   * System Prompt 针对 Minimax 模型特性的进一步调优
-  * 记忆系统的冷启动优化（新用户引导）
+  * 新用户冷启动引导
