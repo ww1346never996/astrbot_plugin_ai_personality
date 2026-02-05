@@ -213,8 +213,15 @@ LLM 摘要 (Consolidation Template)
 ├─ "evolution_instruction" → 更新动态人格配置
         │
         ▼
-删除 Raw Logs + 重置 raw_count
+删除 Raw Logs + 重置 raw_count (使用 update_state 直接赋值)
 ```
+
+### 5.3 修复记录
+
+| 日期 | 问题 | 修复内容 |
+|-----|------|---------|
+| 2026-02-05 | `raw_count` 与实际数量不同步 | `update_state` 新增直接设置 `raw_count` 支持 |
+| 2026-02-05 | consolidation 流程难以追踪 | `_consolidate` 添加 `[Consolidate]` 调试日志 |
 
 ---
 
