@@ -139,7 +139,7 @@ class MemoryManager:
             include=["metadatas", "documents"],
             limit=limit
         )
-        return {"ids": res['ids'], "documents': res['documents']}
+        return {"ids": res['ids'], "documents": res['documents']}
 
     def retrieve_insights(self, user_id, query_text, n_results=5):
         """
