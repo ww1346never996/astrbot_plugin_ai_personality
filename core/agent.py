@@ -138,12 +138,23 @@ class SakikoAgent:
         """
         === 修复点 3: 这里的 prompt 结构已修正，不会再报 400 empty content ===
         """
+        state = self.memory.get_state(user_id)
         raw_data = self.memory.get_raw_logs_for_consolidation(user_id)
-        if not raw_data['ids']: return
+
+        logger.info(f"[Consolidate] User: {user_id}")
+        logger.info(f"[Consolidate] raw_count before: {state['raw_count']}")
+        logger.info(f"[Consolidate] raw logs in DB: {len(raw_data['ids'])}")
+
+        if not raw_data['ids']:
+            logger.warning(f"[Consolidate] No raw logs to consolidate")
+            return
 
         valid_docs = [doc for doc in raw_data['documents'] if doc and doc.strip()]
         if not valid_docs:
+            logger.warning(f"[Consolidate] All documents are empty, deleting IDs: {len(raw_data['ids'])}")
             self.memory.delete_logs(raw_data['ids'])
+            new_count = max(0, state.get('raw_count', 0) - len(raw_data['ids']))
+            self.memory.update_state(user_id, {"raw_count": new_count})
             return
 
         history = "\n".join(valid_docs)
@@ -172,13 +183,14 @@ class SakikoAgent:
                 self.memory.add_log(user_id, f"长期记忆: {res['insight']}", type="insight")
             if res.get("evolution_instruction"):
                 self.memory.update_profile(user_id, res['evolution_instruction'])
-            
+
             # 清理旧日志并重置计数器
+            logger.info(f"[Consolidate] Deleting {len(raw_data['ids'])} raw logs")
             self.memory.delete_logs(raw_data['ids'])
             # 强制计算新的 raw_count
-            current_state = self.memory.get_state(user_id)
-            new_count = max(0, current_state.get('raw_count', 0) - len(raw_data['ids']))
+            new_count = max(0, state.get('raw_count', 0) - len(raw_data['ids']))
             self.memory.update_state(user_id, {"raw_count": new_count})
+            logger.info(f"[Consolidate] Done. raw_count after: {new_count}")
             
         except Exception as e:
             logger.error(f"[Consolidation Failed] {e}")

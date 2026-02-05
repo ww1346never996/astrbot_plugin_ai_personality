@@ -109,6 +109,8 @@ class MemoryManager:
             s['mood'] = updates['mood']
         if "raw_count_delta" in updates:
             s['raw_count'] = max(0, s.get('raw_count', 0) + updates['raw_count_delta'])
+        if "raw_count" in updates:
+            s['raw_count'] = max(0, updates['raw_count'])
         self._save_json(self.state_path, self.states)
 
     def get_profile(self, user_id):
