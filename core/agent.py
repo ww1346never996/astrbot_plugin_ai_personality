@@ -206,20 +206,21 @@ class SakikoAgent:
             logger.error(f"[Consolidation Failed] {e}")
 
     def chat(self, user_id, user_name, text, image_path=None):
-        # ... (chat 逻辑保持 Router 版逻辑不变) ...
-        # (为了节省篇幅，这里假设 chat 方法与上一版一致，包含 _analyze_intent 等调用)
-        # 只要确保上面 _synthesize_response 和 _consolidate 改了就行
         logger.info(f"[Sakiko] 收到消息: {text} | 图片: {image_path is not None}")
-        
+
         # 过滤完全匹配 "status" 的文本，防止漏网之鱼
         if text.strip() == "status": return "（请使用 /status 查看状态）"
 
-        analyze_text = text if text else "（用户仅发送了图片）"
-        intent = self._analyze_intent(analyze_text, image_path is not None)
-        
+        # 当只发图片没有文字时，强制分析图片
+        if not text and image_path:
+            intent = {"is_technical": False, "need_web_search": False, "need_image_analysis": True, "search_query": ""}
+        else:
+            analyze_text = text if text else "（用户仅发送了图片）"
+            intent = self._analyze_intent(analyze_text, image_path is not None)
+
         observation_parts = []
         if intent.get("need_image_analysis") and image_path:
-             vis_res = asyncio.run(self._call_mcp_tool("understand_image", {"prompt": "Analyze detail.", "image_source": image_path}))
+             vis_res = asyncio.run(self._call_mcp_tool("understand_image", {"prompt": "Describe this image in detail.", "image_source": image_path}))
              observation_parts.append(f"【视觉数据】: {vis_res}")
 
         if intent.get("need_web_search"):
@@ -227,23 +228,22 @@ class SakikoAgent:
             if query:
                 search_res = asyncio.run(self._call_mcp_tool("web_search", {"query": query}))
                 observation_parts.append(f"【搜索结果】: {search_res}")
-        
+
         full_observation = "\n".join(observation_parts)
         return self._synthesize_response(user_id, user_name, text, full_observation, intent)
 
     def get_status(self, user_id):
-        # ... (保持上一版的轻量级实现) ...
         s = self.memory.get_state(user_id)
         evolution = self.memory.get_profile(user_id) or "默认"
         get_history_func = getattr(self.memory, "get_recent_history", None)
-        memory_str = "\n".join(get_history_func(user_id, limit=3)) if get_history_func else "No Data"
-        
+        memory_str = "\n".join(get_history_func(user_id, limit=5)) if get_history_func else "No Data"
+
         return f"""
 📊 [Sakiko Status Panel]
 ------------------------
 ❤️ 亲密度: {s.get('intimacy', 50)}
 ☁️ 心情值: {s.get('mood', 'calm')}
-🧠 待反思: {s.get('raw_count', 0)} / 10
+🧠 待反思: {s.get('raw_count', 0)} / 15
 ⌚ 时间: {datetime.datetime.now().strftime("%H:%M")}
 
 🧬 [Evolution]
