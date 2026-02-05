@@ -1,0 +1,4 @@
+httpx>=0.25.0
+chromadb>=0.4.0
+openai>=1.0.0
+aiohttp>=3.9.0

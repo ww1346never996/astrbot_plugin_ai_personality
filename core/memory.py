@@ -1,91 +1,158 @@
-# core/memory.py
+# plugins/astrbot_plugin_ai_personality/core/memory.py
 # -*- coding: utf-8 -*-
 import os
 import json
 import time
-import datetime
+import uuid
 import chromadb
+from astrbot.api import logger
 
 class MemoryManager:
-    def __init__(self, base_dir):
-        # 初始化路径
-        self.data_dir = os.path.join(base_dir, "data")
-        if not os.path.exists(self.data_dir): os.makedirs(self.data_dir)
+    def __init__(self, plugin_dir):
+        # 数据持久化路径 (宿主机挂载)
+        self.data_dir = "/AstrBot/data/soulmate_data"
         
-        # 数据库连接
-        self.chroma = chromadb.PersistentClient(path=os.path.join(self.data_dir, "chromadb"))
-        self.collection = self.chroma.get_or_create_collection(name="soulmate_memory")
+        # 自动修复权限/创建目录
+        if not os.path.exists(self.data_dir):
+            try:
+                os.makedirs(self.data_dir, exist_ok=True)
+                os.chmod(self.data_dir, 0o777)
+            except Exception as e:
+                logger.warning(f"[Sakiko Memory] 目录创建/赋权失败: {e}")
+
+        self.profile_path = os.path.join(self.data_dir, "dynamic_profiles.json")
+        self.state_path = os.path.join(self.data_dir, "user_states.json")
+        self.chroma_path = os.path.join(self.data_dir, "chromadb")
         
-        # 文件路径
-        self.state_file = os.path.join(self.data_dir, "user_states.json")
-        self.profile_file = os.path.join(self.data_dir, "dynamic_profiles.json")
-        
-        # 加载缓存
-        self.states = self._load_json(self.state_file)
-        self.profiles = self._load_json(self.profile_file)
+        logger.info(f"[Sakiko Memory] ChromaDB Path: {self.chroma_path}")
+        try:
+            self.chroma = chromadb.PersistentClient(path=self.chroma_path)
+        except Exception as e:
+            logger.error(f"[Sakiko Memory] DB Init Failed: {e}")
+            if "readonly" in str(e):
+                logger.error("!!! 请在宿主机执行: sudo chmod -R 777 ./data/soulmate_data !!!")
+            raise e
+
+        self.profiles = self._load_json(self.profile_path)
+        self.states = self._load_json(self.state_path)
 
     def _load_json(self, path):
-        if os.path.exists(path):
+        if not os.path.exists(path): return {}
+        try:
             with open(path, 'r', encoding='utf-8') as f:
-                try: return json.load(f)
-                except: return {}
-        return {}
+                return json.load(f)
+        except: return {}
 
     def _save_json(self, path, data):
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            try: os.chmod(path, 0o666)
+            except: pass
+        except Exception as e:
+            logger.error(f"Save JSON failed: {e}")
+            
+    # === 请将此方法添加到 MemoryManager 类中 ===
+    def get_recent_history(self, user_id, limit=3):
+        """获取最近 N 条记忆用于 Status 展示"""
+        coll = self.chroma.get_or_create_collection("soulmate_memory")
+        try:
+            # 获取该用户的所有 raw log (为了排序，这里取稍微多一点，比如最近 10 条，然后截取)
+            # 注意：Chroma 的 get 性能通常很快
+            results = coll.get(
+                where={"user_id": str(user_id)},
+                # 只获取 metadata 和 document，不需要 embedding
+                include=["metadatas", "documents"]
+            )
+            
+            if not results['ids']:
+                return ["(暂无记忆)"]
 
-    # === 用户状态管理 ===
+            # 组装数据列表
+            logs = []
+            for i in range(len(results['ids'])):
+                meta = results['metadatas'][i]
+                doc = results['documents'][i]
+                timestamp = float(meta.get("timestamp", 0))
+                logs.append({"ts": timestamp, "content": doc, "type": meta.get("type", "unknown")})
+
+            # 按时间倒序排序 (最新的在前面)
+            logs.sort(key=lambda x: x['ts'], reverse=True)
+            
+            # 取前 N 条
+            recent = logs[:limit]
+            
+            # 格式化输出
+            formatted = []
+            for item in recent:
+                # 转换时间戳为可读时间
+                time_str = time.strftime("%H:%M:%S", time.localtime(item['ts']))
+                formatted.append(f"[{time_str}] {item['content']}")
+                
+            return formatted
+
+        except Exception as e:
+            logger.error(f"[Memory Get History Error] {e}")
+            return [f"读取失败: {e}"]
+
     def get_state(self, user_id):
-        uid = str(user_id)
-        if uid not in self.states:
-            self.states[uid] = {"intimacy": 10, "mood": "neutral", "raw_count": 0}
-        return self.states[uid]
+        user_id = str(user_id)
+        if user_id not in self.states:
+            self.states[user_id] = {"intimacy": 50, "mood": "calm", "raw_count": 0}
+        return self.states[user_id]
 
     def update_state(self, user_id, updates):
-        state = self.get_state(user_id)
-        # 合并更新
-        for k, v in updates.items():
-            if k == "intimacy": state[k] = max(0, min(100, state[k] + v))
-            elif k == "raw_count_delta": state["raw_count"] = max(0, state.get("raw_count", 0) + v)
-            else: state[k] = v
-        self._save_json(self.state_file, self.states)
+        s = self.get_state(user_id)
+        if "intimacy" in updates:
+            s['intimacy'] = max(0, min(100, s['intimacy'] + updates['intimacy']))
+        if "mood" in updates:
+            s['mood'] = updates['mood']
+        if "raw_count_delta" in updates:
+            s['raw_count'] = max(0, s.get('raw_count', 0) + updates['raw_count_delta'])
+        self._save_json(self.state_path, self.states)
 
-    # === 全局人格管理 ===
     def get_profile(self, user_id):
-        return self.profiles.get(str(user_id), "默认模式")
+        return self.profiles.get(str(user_id), "普通用户")
 
     def update_profile(self, user_id, instruction):
-        if instruction:
-            self.profiles[str(user_id)] = instruction
-            self._save_json(self.profile_file, self.profiles)
+        self.profiles[str(user_id)] = instruction
+        self._save_json(self.profile_path, self.profiles)
 
-    # === 向量记忆管理 ===
-    def add_log(self, user_id, text, type="raw", importance=1):
-        uid = str(user_id)
-        self.collection.add(
-            documents=[text],
-            metadatas=[{"user_id": uid, "type": type, "timestamp": datetime.datetime.now().isoformat(), "importance": importance}],
-            ids=[f"{uid}_{type}_{time.time()}"]
-        )
-        if type == "raw":
-            self.update_state(uid, {"raw_count_delta": 1})
-
-    def retrieve(self, user_id, query):
-        uid = str(user_id)
-        if not query: query = "context"
+    def add_log(self, user_id, content, type="raw"):
+        coll = self.chroma.get_or_create_collection("soulmate_memory")
         try:
-            # 混合检索：Insight + Raw
-            res_insight = self.collection.query(query_texts=[query], n_results=2, where={"$and": [{"user_id": uid}, {"type": "insight"}]})
-            res_raw = self.collection.query(query_texts=[query], n_results=2, where={"$and": [{"user_id": uid}, {"type": "raw"}]})
-            merged = []
-            if res_insight['documents']: merged.extend(res_insight['documents'][0])
-            if res_raw['documents']: merged.extend(res_raw['documents'][0])
-            return merged
-        except: return []
+            coll.add(
+                documents=[content],
+                metadatas=[{"type": type, "timestamp": str(time.time()), "user_id": str(user_id)}],
+                ids=[str(uuid.uuid4())]
+            )
+            if type == "raw":
+                self.update_state(user_id, {"raw_count_delta": 1})
+        except Exception as e:
+            logger.error(f"[Memory Add Error] {e}")
 
-    def get_raw_logs_for_consolidation(self, user_id, limit=10):
-        return self.collection.get(where={"$and": [{"user_id": str(user_id)}, {"type": "raw"}]}, limit=limit)
+    def retrieve(self, user_id, query_text, n_results=3):
+        coll = self.chroma.get_or_create_collection("soulmate_memory")
+        try:
+            # 如果 query 为空（比如只发图没说话），则不检索或检索最近
+            if not query_text or not query_text.strip():
+                return []
+            
+            results = coll.query(
+                query_texts=[query_text],
+                n_results=n_results,
+                where={"user_id": str(user_id)}
+            )
+            return results['documents'][0] if results['documents'] else []
+        except:
+            return []
+
+    def get_raw_logs_for_consolidation(self, user_id):
+        coll = self.chroma.get_or_create_collection("soulmate_memory")
+        res = coll.get(where={"$and": [{"user_id": str(user_id)}, {"type": "raw"}]}, limit=15)
+        return {"ids": res['ids'], "documents": res['documents']}
 
     def delete_logs(self, ids):
-        self.collection.delete(ids=ids)
+        if not ids: return
+        coll = self.chroma.get_or_create_collection("soulmate_memory")
+        coll.delete(ids=ids)
