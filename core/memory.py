@@ -69,19 +69,34 @@ class MemoryManager:
         """
         user_id = str(user_id)
         default_profile = {
-            "communication_style": "balanced",  # formal / casual / balanced / playful
-            "humor_level": "moderate",  # low / moderate / high
-            "caring_frequency": "moderate",  # infrequent / moderate / frequent
-            "sensitive_topics": [],  # 敏感话题列表
-            "preferred_topics": [],  # 用户感兴趣的话题
-            "interaction_patterns": [],  # 交互模式描述
-            "personality_traits": [],  # 用户性格特征观察
-            "last_context": "",  # 最近的情境描述
-            "relationship_summary": "",  # 关系总结
+            "communication_style": "balanced",
+            "humor_level": "moderate",
+            "caring_frequency": "moderate",
+            "sensitive_topics": [],
+            "preferred_topics": [],
+            "interaction_patterns": [],
+            "personality_traits": [],
+            "last_context": "",
+            "relationship_summary": "",
             "total_conversations": 0,
             "last_interaction_time": 0
         }
-        return self.profiles.get(user_id, default_profile)
+
+        stored = self.profiles.get(user_id)
+        if stored is None:
+            return default_profile
+
+        # 兼容旧数据：如果存储的是字符串，迁移到新的字典格式
+        if isinstance(stored, str):
+            if stored and stored != "普通用户":
+                default_profile["relationship_summary"] = stored
+            return default_profile
+
+        # 确保返回字典（防御性检查）
+        if not isinstance(stored, dict):
+            return default_profile
+
+        return {**default_profile, **stored}
 
     def update_user_profile(self, user_id, profile_updates):
         """
