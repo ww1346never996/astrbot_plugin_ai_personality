@@ -37,8 +37,10 @@ TOPIC_END_KEYWORDS = [
 
 
 class SakikoAgent:
-    def __init__(self, config, plugin_dir):
+    def __init__(self, config):
+        # AstrBot 只传 Context (包含config)，从中获取 plugin_dir
         # config 保留用于兼容，但不使用（单用户模式）
+        plugin_dir = getattr(config, "BASE_DIR", None) or os.getenv("PLUGIN_DIR", "/AstrBot/data")
         self.api_key = os.getenv("MINIMAX_API_KEY") or "sk-cp-你的key"
         self.host = os.getenv("MINIMAX_API_HOST", "https://api.minimaxi.com")
 

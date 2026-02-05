@@ -18,7 +18,7 @@ class SoulmatePlugin(Star):
         super().__init__(context)
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.cfg = PluginConfig(self.base_dir)
-        self.agent = SakikoAgent(self.cfg, self.base_dir)
+        self.agent = SakikoAgent(self.cfg)
 
     async def _download_image_to_file(self, url):
         try:
